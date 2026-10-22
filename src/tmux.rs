@@ -40,6 +40,9 @@ const TRUST_QUESTION: &str = "trust this folder";
 const WIDTH: &str = "120";
 const HEIGHT: &str = "50";
 const HISTORY: &str = "10000";
+/// A session whose screen hasn't changed for this long is stuck: a working
+/// Claude's spinner and tool timers tick every second.
+const STALL: Duration = Duration::from_secs(15 * 60);
 /// The most scrollback the dashboard may ask for at once.
 pub const MAX_HISTORY: u32 = 10_000;
 
@@ -79,12 +82,15 @@ pub struct TmuxRunner {
     /// Each running session's proxy key, revoked when its Claude is replaced
     /// or the session ends.
     live: Mutex<HashMap<String, String>>,
+    /// How long a screen may stay the same before the burst calls it stuck.
+    stall: Duration,
 }
 
 enum Turn {
     Done { session_id: Option<String>, text: String },
     Exited,
     TimedOut,
+    Stalled,
 }
 
 impl TmuxRunner {
@@ -95,6 +101,7 @@ impl TmuxRunner {
             dir: cfg.sessions_dir(),
             keys,
             live: Mutex::new(HashMap::new()),
+            stall: STALL,
         }
     }
 
@@ -247,11 +254,24 @@ impl TmuxRunner {
         self.tmux_ok(&["send-keys", "-t", &target, "Enter"]).await.map(drop)
     }
 
-    /// Waits for the turn file, Claude exiting, or the deadline. Until `settle`,
-    /// it also answers Claude Code's folder-trust question if it shows.
+    /// Waits for the turn file, Claude exiting, the screen standing still for
+    /// `stall`, or the deadline. Until `settle`, it also answers Claude Code's
+    /// folder-trust question if it shows.
     async fn wait(&self, name: &str, turn: &Path, deadline: Instant, settle: Option<Instant>) -> Turn {
         let target = format!("={name}:");
+        // The screen is compared about 15 times per stall (each look is a sudo).
+        let check_every = (self.stall / 15).max(POLL);
+        let (mut last_screen, mut checked, mut still_since) = (String::new(), Instant::now(), Instant::now());
         for look in 0u32.. {
+            if checked.elapsed() >= check_every {
+                checked = Instant::now();
+                let screen = self.tmux_ok(&["capture-pane", "-p", "-t", &target]).await.unwrap_or_default();
+                if screen != last_screen {
+                    (last_screen, still_since) = (screen, Instant::now());
+                } else if still_since.elapsed() >= self.stall {
+                    return Turn::Stalled;
+                }
+            }
             if settle.is_some_and(|until| Instant::now() < until) {
                 let screen = self.tmux_ok(&["capture-pane", "-p", "-t", &target]).await.unwrap_or_default();
                 if let Some(key) = trust_key(&screen) {
@@ -311,6 +331,12 @@ impl TmuxRunner {
                 Turn::Exited => {
                     let screen = self.screen(name).await;
                     return Ok(failed(req.resume.clone(), format!("claude exited in its tmux session:\n{screen}")));
+                }
+                Turn::Stalled => {
+                    // Claude stays up, so a person can look, or answer on the issue.
+                    let screen = self.screen(name).await;
+                    let minutes = self.stall.as_secs() / 60;
+                    return Ok(failed(req.resume.clone(), format!("the session's screen hasn't changed for {minutes} minutes:\n{screen}")));
                 }
                 Turn::TimedOut => {
                     let target = format!("={name}:");
@@ -675,7 +701,7 @@ done
         cfg.claude.session_user = None;
         std::fs::create_dir_all(cfg.sessions_dir()).unwrap();
         let keys = SessionKeys::new();
-        let runner = TmuxRunner::new(&cfg, keys.clone());
+        let mut runner = TmuxRunner::new(&cfg, keys.clone());
         let worktree = tmp.path().to_path_buf();
         let req = |prompt: &str, resume: Option<&str>| BurstRequest {
             repo: "o/r".into(),
@@ -703,6 +729,13 @@ done
         assert_eq!(second.outcome, Outcome::Blocked { reason: "stuck".into() });
         assert_eq!(second.session_id.as_deref(), Some("s-2"));
         assert!(!cfg.sessions_dir().join("o-r-7.prompt.md").exists(), "a burst that ends removes its prompt");
+
+        // A Claude that goes quiet, its screen standing still, is called stuck.
+        runner.stall = Duration::from_secs(3);
+        let quiet = runner.burst(req("QUIET burst", Some("s-2"))).await.unwrap();
+        let Outcome::Blocked { reason } = &quiet.outcome else { panic!("{quiet:?}") };
+        assert!(reason.starts_with("the session's screen hasn't changed for 0 minutes"), "{reason}");
+        assert!(runner.running("o-r-7").await, "a stuck Claude is left up for a person to look at");
 
         // Forge restarted mid-turn: the prompt file is still there and Claude is
         // up, so the burst waits for that turn instead of sending its prompt.
