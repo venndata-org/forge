@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
@@ -23,11 +24,50 @@ use crate::pool::{limits_from_headers, reset_from_headers, Lease, Pool};
 #[derive(Clone, Default)]
 pub struct SessionKeys {
     inner: Arc<RwLock<HashMap<String, String>>>,
+    /// Where the keys are saved, if anywhere: see `saved_in`.
+    file: Option<Arc<PathBuf>>,
+}
+
+/// The tag of a task's tmux session key (`tmux.rs`): the only keys whose
+/// holder outlives a restart of Forge.
+pub fn tmux_tag(repo: &str, issue: u64) -> String {
+    format!("{repo}#{issue} tmux")
 }
 
 impl SessionKeys {
     pub fn new() -> SessionKeys {
         SessionKeys::default()
+    }
+
+    /// Keys saved in `file` (mode 600) on every change and read back at start.
+    /// Each task's Claude runs on in tmux while Forge restarts, holding its
+    /// key, so tmux keys must survive a restart; every other key's holder dies
+    /// with Forge, so only tmux keys are read back.
+    pub fn saved_in(file: PathBuf) -> Result<SessionKeys> {
+        let mut keys: HashMap<String, String> = match std::fs::read(&file) {
+            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("reading {}", file.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+        };
+        keys.retain(|_, tag| tag.ends_with(" tmux"));
+        let keys = SessionKeys { inner: Arc::new(RwLock::new(keys)), file: Some(Arc::new(file)) };
+        keys.save(&keys.inner.read().unwrap());
+        Ok(keys)
+    }
+
+    fn save(&self, keys: &HashMap<String, String>) {
+        let Some(file) = &self.file else { return };
+        let tmp = file.with_extension("tmp");
+        let written = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+            f.write_all(&serde_json::to_vec(keys).unwrap_or_default())?;
+            std::fs::rename(&tmp, file.as_ref())
+        })();
+        if let Err(e) = written {
+            tracing::warn!("can't save the session keys: {e}");
+        }
     }
 
     /// Makes a new random key for `tag` (e.g. "example-team/shop#412").
@@ -37,12 +77,17 @@ impl SessionKeys {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
         let key = format!("fk_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes));
-        self.inner.write().unwrap().insert(key.clone(), tag.to_string());
+        let mut keys = self.inner.write().unwrap();
+        keys.insert(key.clone(), tag.to_string());
+        self.save(&keys);
         key
     }
 
     pub fn revoke(&self, key: &str) {
-        self.inner.write().unwrap().remove(key);
+        let mut keys = self.inner.write().unwrap();
+        if keys.remove(key).is_some() {
+            self.save(&keys);
+        }
     }
 
     /// The tag a live key was issued for.
@@ -53,7 +98,12 @@ impl SessionKeys {
     /// Revokes every live key whose tag starts with `prefix`, e.g. a task's
     /// attach keys once the engine finds the attach stale.
     pub fn revoke_tagged(&self, prefix: &str) {
-        self.inner.write().unwrap().retain(|_, tag| !tag.starts_with(prefix));
+        let mut keys = self.inner.write().unwrap();
+        let before = keys.len();
+        keys.retain(|_, tag| !tag.starts_with(prefix));
+        if keys.len() != before {
+            self.save(&keys);
+        }
     }
 }
 
@@ -330,6 +380,25 @@ mod tests {
 
     /// When the fake upstream says a busy plan may be used again.
     const RESET: i64 = 4_000_000_000;
+
+    #[test]
+    fn tmux_keys_outlive_a_restart_and_no_others_do() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("keys.json");
+        let keys = SessionKeys::saved_in(file.clone()).unwrap();
+        let session = keys.issue(&tmux_tag("o/r", 7));
+        let burst = keys.issue("o/r#8 review");
+        let gone = keys.issue(&tmux_tag("o/r", 9));
+        keys.revoke_tagged(&tmux_tag("o/r", 9));
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let again = SessionKeys::saved_in(file.clone()).unwrap();
+        assert_eq!(again.tag(&session).as_deref(), Some("o/r#7 tmux"), "the running session keeps its key");
+        assert_eq!(again.tag(&burst), None, "a burst's process died with Forge");
+        assert_eq!(again.tag(&gone), None);
+        assert_eq!(SessionKeys::new().tag(&session), None, "keys kept in memory only are lost");
+    }
 
     struct Seen {
         method: Method,

@@ -233,7 +233,7 @@ async fn serve(cfg: Config) -> Result<()> {
     }
     let pool = Arc::new(pool::Pool::load(&cfg.pool)?);
     pool.restore(db.all_limits()?);
-    let keys = proxy::SessionKeys::new();
+    let keys = proxy::SessionKeys::saved_in(cfg.data_dir.join("state/session-keys.json"))?;
     let notifier: Arc<dyn notify::Notifier> = Arc::new(notify::LiveNotifier::from_config(&cfg)?);
     let gh: Arc<dyn github::GitHubApi> = Arc::new(github::AppClient::new(&cfg.github)?);
     let git: Arc<dyn gitops::GitOps> = Arc::new(gitops::CliGit {

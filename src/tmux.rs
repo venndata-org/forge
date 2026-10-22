@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::config::{Config, REVIEW_ROLE};
-use crate::proxy::SessionKeys;
+use crate::proxy::{tmux_tag, SessionKeys};
 use crate::session::{has_forge_block, parse_outcome, ClaudeRunner, Runner, CLAUDE_ENV};
 use crate::types::{BurstRequest, BurstResult, Outcome};
 
@@ -129,13 +129,16 @@ impl TmuxRunner {
     async fn start(&self, name: &str, req: &BurstRequest, prompt: &Path, turn: &Path) -> Result<()> {
         self.trust(&req.worktree).await;
         let settings = self.dir.join("claude-settings.json");
+        // StopFailure: a turn that ends on an API error ends all the same.
         let hook = format!("{} turn-done", self.headless.forge_bin.display());
-        let body = json!({ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": hook } ] } ] } });
+        let done = json!([ { "hooks": [ { "type": "command", "command": hook } ] } ]);
+        let body = json!({ "hooks": { "Stop": done, "StopFailure": done } });
         std::fs::write(&settings, serde_json::to_vec_pretty(&body)?).context("writing Claude's settings")?;
-        let key = self.keys.issue(&format!("{}#{} tmux", req.repo, req.issue));
-        if let Some(old) = self.live.lock().unwrap().insert(name.to_string(), key.clone()) {
-            self.keys.revoke(&old);
-        }
+        // By tag, not just `live`: a key from before a restart is saved, not in `live`.
+        let tag = tmux_tag(&req.repo, req.issue);
+        self.keys.revoke_tagged(&tag);
+        let key = self.keys.issue(&tag);
+        self.live.lock().unwrap().insert(name.to_string(), key.clone());
         let mut claude = format!(
             "exec {} --model {} --effort {} --dangerously-skip-permissions --settings {}",
             sh_quote(&self.headless.bin.display().to_string()),
@@ -399,9 +402,8 @@ impl Runner for TmuxRunner {
         let name = session_name(repo, issue);
         let target = format!("={name}");
         let _ = self.tmux(&["kill-session", "-t", &target]).await;
-        if let Some(key) = self.live.lock().unwrap().remove(&name) {
-            self.keys.revoke(&key);
-        }
+        self.live.lock().unwrap().remove(&name);
+        self.keys.revoke_tagged(&tmux_tag(repo, issue));
         for file in [format!("{name}.turn.json"), format!("{name}.prompt.md")] {
             let _ = std::fs::remove_file(self.dir.join(file));
         }
@@ -469,9 +471,14 @@ pub fn turn_done(hook_input: &str) -> Result<()> {
 fn write_turn(hook_input: &str, out: &Path) -> Result<()> {
     let hook: Value = serde_json::from_str(hook_input).context("reading the hook's input")?;
     let transcript = hook["transcript_path"].as_str().unwrap_or_default();
-    let mut text = None;
+    // A turn that failed says so, rather than repeat an older message.
+    let failed = (hook["hook_event_name"] == "StopFailure").then(|| {
+        let why = hook["error"].as_str().or(hook["error"]["message"].as_str()).unwrap_or("no reason given");
+        format!("The turn stopped on an error: {why}")
+    });
+    let mut text = failed.clone();
     // The transcript can lag the hook by a moment.
-    for _ in 0..5 {
+    for _ in 0..if failed.is_some() { 0 } else { 5 } {
         text = last_assistant_text(&std::fs::read_to_string(transcript).unwrap_or_default());
         if text.is_some() {
             break;
@@ -566,6 +573,20 @@ mod tests {
         trust_in(&fresh, Path::new("/w/forge-8")).unwrap();
         let v: Value = serde_json::from_slice(&std::fs::read(&fresh).unwrap()).unwrap();
         assert_eq!(v["projects"]["/w/forge-8"]["hasTrustDialogAccepted"], true);
+    }
+
+    #[test]
+    fn a_failed_turn_reports_its_error_not_an_older_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = tmp.path().join("t.jsonl");
+        let old = json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": "```forge\n{\"outcome\":\"pr\"}\n```" }] } });
+        std::fs::write(&transcript, old.to_string() + "\n").unwrap();
+        let out = tmp.path().join("turn.json");
+        let hook = json!({ "hook_event_name": "StopFailure", "session_id": "s-1", "transcript_path": transcript, "error": "401 a live Forge session key is needed" });
+        write_turn(&hook.to_string(), &out).unwrap();
+        let v: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        assert_eq!(v["text"], "The turn stopped on an error: 401 a live Forge session key is needed");
+        assert!(!has_forge_block(v["text"].as_str().unwrap()));
     }
 
     /// A real tmux server and a stand-in `claude` that answers its first
