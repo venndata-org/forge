@@ -477,13 +477,23 @@ fn write_turn(hook_input: &str, out: &Path) -> Result<()> {
         format!("The turn stopped on an error: {why}")
     });
     let mut text = failed.clone();
-    // The transcript can lag the hook by a moment.
-    for _ in 0..if failed.is_some() { 0 } else { 5 } {
-        text = last_assistant_text(&std::fs::read_to_string(transcript).unwrap_or_default());
-        if text.is_some() {
-            break;
+    // The transcript can lag the hook, and then its last message is an older
+    // one. Claude Code names the last message in the hook (clipping a long
+    // one), so read the transcript until it ends on that message, or else use
+    // the hook's copy.
+    let said = hook["last_assistant_message"].as_str().filter(|t| !t.trim().is_empty());
+    if failed.is_none() {
+        for _ in 0..20 {
+            text = last_assistant_text(&std::fs::read_to_string(transcript).unwrap_or_default());
+            match (said, text.as_deref()) {
+                (Some(said), Some(read)) if same_message(said, read) => break,
+                (None, Some(_)) => break,
+                _ => std::thread::sleep(Duration::from_millis(300)),
+            }
         }
-        std::thread::sleep(Duration::from_millis(300));
+        if let Some(said) = said.filter(|said| !text.as_deref().is_some_and(|read| same_message(said, read))) {
+            text = Some(said.to_string());
+        }
     }
     let body = json!({ "session_id": hook["session_id"], "text": text.unwrap_or_default() });
     // Readable by Forge, which doesn't share the session user's group.
@@ -494,6 +504,13 @@ fn write_turn(hook_input: &str, out: &Path) -> Result<()> {
 }
 
 /// The text of the transcript's last assistant message that has any.
+/// Whether the transcript's message is the one the hook named, which Claude
+/// Code may have clipped ("… [+N chars]").
+fn same_message(said: &str, read: &str) -> bool {
+    let head = said.rsplit_once("\u{2026} [+").map_or(said, |(head, _)| head);
+    read.trim_start().starts_with(head.trim())
+}
+
 fn last_assistant_text(transcript: &str) -> Option<String> {
     transcript.lines().rev().find_map(|line| {
         let entry: Value = serde_json::from_str(line).ok()?;
@@ -573,6 +590,35 @@ mod tests {
         trust_in(&fresh, Path::new("/w/forge-8")).unwrap();
         let v: Value = serde_json::from_slice(&std::fs::read(&fresh).unwrap()).unwrap();
         assert_eq!(v["projects"]["/w/forge-8"]["hasTrustDialogAccepted"], true);
+    }
+
+    #[test]
+    fn the_hook_waits_for_the_message_it_was_told_of() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = tmp.path().join("t.jsonl");
+        let say = |text: &str| json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": text }] } }).to_string() + "\n";
+        let last = "Done.\n```forge\n{\"outcome\":\"pr\",\"title\":\"t\",\"body\":\"b\"}\n```";
+        std::fs::write(&transcript, say("Status: still compiling.")).unwrap();
+        let out = tmp.path().join("turn.json");
+        let hook = json!({ "session_id": "s-1", "transcript_path": transcript, "last_assistant_message": "Done.\n```forge\n{\"outcome\" \u{2026} [+40 chars]" });
+        // The final message lands in the transcript a moment after the hook runs.
+        let (path, late) = (transcript.clone(), say(last));
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            std::io::Write::write_all(&mut f, late.as_bytes()).unwrap();
+        });
+        write_turn(&hook.to_string(), &out).unwrap();
+        writer.join().unwrap();
+        let v: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        assert_eq!(v["text"], last, "the stale status line is not taken for the turn's end");
+
+        // Never in the transcript: the hook's own copy is used.
+        std::fs::write(&transcript, say("Older.")).unwrap();
+        let hook = json!({ "session_id": "s-1", "transcript_path": transcript, "last_assistant_message": "Whole message." });
+        write_turn(&hook.to_string(), &out).unwrap();
+        let v: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        assert_eq!(v["text"], "Whole message.");
     }
 
     #[test]

@@ -5,10 +5,10 @@
 # the secret files under /etc/forge are written by people, on this box (RUNBOOK.md).
 set -euo pipefail
 
-DOMAIN="${FORGE_DOMAIN:?set FORGE_DOMAIN to the box's domain, e.g. forge.example.com}"
+DOMAIN="${FORGE_DOMAIN:?set FORGE_DOMAIN to the domain of this box, e.g. forge.example.com}"
 
 apt-get update -q
-apt-get install -yq git curl ca-certificates sudo caddy tmux
+apt-get install -yq git curl ca-certificates sudo caddy tmux libssl-dev pkg-config
 
 # forge runs the daemon and alone reads /etc/forge. forge-run runs Claude sessions,
 # checks, e2e and attach; through the forge-work group it reads Forge's mirrors and
@@ -79,6 +79,10 @@ fi
 
 install -m 644 "$(dirname "$0")/forge.service" /etc/systemd/system/forge.service
 install -m 644 "$(dirname "$0")/forge-tmux.service" /etc/systemd/system/forge-tmux.service
+# needrestart (apt, unattended upgrades) must never restart the tmux server:
+# that would end every task's Claude session.
+mkdir -p /etc/needrestart/conf.d
+echo '$nrconf{override_rc}{qr(^forge-tmux\.service$)} = 0;' > /etc/needrestart/conf.d/forge.conf
 install -m 644 "$(dirname "$0")/forge-keys.service" /etc/systemd/system/forge-keys.service
 install -m 644 "$(dirname "$0")/forge-keys.timer" /etc/systemd/system/forge-keys.timer
 # Hourly, root updates that copy; sessions don't update themselves.
