@@ -1,0 +1,9 @@
+[Unit]
+Description=Update Forge's Claude Code hourly
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

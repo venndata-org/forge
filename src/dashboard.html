@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forge</title>
+<style>
+/* Layout: a top bar, what waits on you, then the board (one column per status), plans at the foot.
+   A session opens in a side panel with its live screen and, for one person at a time, a keyboard.
+   The screen wraps to the panel (sessions are 120 columns; the font fits that where it can) and
+   scrolls back through the session; scrolling up pauses it until "Back to live". */
+:root {
+  color-scheme: light;
+  --bg: #f3f4f1; --panel: #ffffff; --ink: #161b18; --muted: #5d6660; --line: #dce1db; --hover: #f7f8f6;
+  --accent: #2a4bcc; --accent-ink: #ffffff; --accent-soft: #e6eaf9;
+  --asked: #6a716c; --ready: #2a4bcc; --building: #0b7285; --reviewed: #b25b00; --accepted: #6d3fd1; --onmain: #1f7a3a;
+  --warn-soft: #fbefdc; --bad: #b42318;
+  --term-bg: #0e1211; --term-fg: #d5dbd8;
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #101412; --panel: #171d1a; --ink: #e3e9e5; --muted: #96a19a; --line: #29322d; --hover: #1c2420;
+    --accent: #8aa0ff; --accent-ink: #0d1530; --accent-soft: #1e2748;
+    --asked: #9aa39d; --ready: #8aa0ff; --building: #4fc3d6; --reviewed: #f0a54a; --accepted: #b79bff; --onmain: #6fd08c;
+    --warn-soft: #3a2a12; --bad: #ff8a7a;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.45 var(--sans); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font: inherit; cursor: pointer; }
+.grow { flex: 1; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mark { display: inline-flex; align-items: center; gap: 9px; font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
+.mark i { width: 18px; height: 18px; border-radius: 4px; background: linear-gradient(135deg, var(--reviewed), var(--accent)); display: inline-block; }
+.btn { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 7px; padding: 6px 11px; font-size: 13px; font-weight: 500; }
+.btn:hover { background: var(--hover); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.warn { border-color: var(--reviewed); color: var(--reviewed); }
+.btn:disabled { opacity: .55; cursor: default; }
+.muted { color: var(--muted); }
+code, .mono { font-family: var(--mono); font-size: 12.5px; }
+
+/* Sign-in */
+#signin { min-height: 100vh; display: grid; place-items: center; padding: 24px max(16px, env(safe-area-inset-left, 0px)); }
+.card { width: min(400px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; display: grid; gap: 16px; }
+.card h1 { margin: 0; font-size: 22px; }
+.card p { margin: 0; color: var(--muted); }
+.card form { display: grid; gap: 10px; }
+.card input { font: inherit; font-size: 16px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); width: 100%; }
+.card input[name=code] { font-family: var(--mono); font-size: 24px; letter-spacing: .45em; text-align: center; }
+.card .btn { padding: 10px; font-size: 15px; }
+#msg { min-height: 1.2em; font-size: 13.5px; }
+
+/* App */
+#app { padding: 0 max(16px, env(safe-area-inset-right, 0px)) 48px max(16px, env(safe-area-inset-left, 0px)); }
+.top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.top .grow { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--onmain); display: inline-block; }
+.dot.busy { background: var(--building); box-shadow: 0 0 0 0 var(--building); animation: pulse 1.8s infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--building) 60%, transparent); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
+section { margin-top: 26px; }
+h2 { font-size: 13px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+
+.waiting { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 10px; }
+.wait { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--reviewed); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; min-width: 0; }
+.wait.question, .wait.blocked { border-left-color: var(--accent); }
+.wait .t { font-weight: 600; overflow-wrap: anywhere; }
+.wait .d { font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.empty { background: var(--panel); border: 1px dashed var(--line); border-radius: 10px; padding: 14px; color: var(--muted); font-size: 14px; }
+
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(190px, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 6px; }
+.col { min-width: 0; display: grid; align-content: start; gap: 8px; }
+.col-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; padding: 2px 2px 6px; border-bottom: 2px solid var(--c); }
+.col-head .n { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.col-head .hint { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.task { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 7px; min-width: 0; }
+.task .t { font-weight: 550; font-size: 14px; overflow-wrap: anywhere; }
+.task .t a, .wait .t a { color: var(--ink); }
+.task .t a:hover, .wait .t a:hover { color: var(--accent); }
+.task .t .num { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; margin-right: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; background: var(--hover); color: var(--muted); border: 1px solid var(--line); }
+.chip.hot { background: var(--warn-soft); color: var(--reviewed); border-color: transparent; }
+.none { color: var(--muted); font-size: 13px; padding: 4px 2px; }
+.backlog { margin-top: 14px; }
+.backlog summary { cursor: pointer; font-size: 13px; font-weight: 650; padding: 6px 2px; }
+.backlog summary .n { color: var(--muted); font-weight: 500; margin: 0 6px 0 4px; }
+.backlog summary .muted { font-weight: 400; }
+.parked { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; margin-top: 6px; }
+
+.plans { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.plan { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; }
+.plan .name { font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+.bar { display: grid; grid-template-columns: 46px 1fr 40px; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.track { position: relative; height: 7px; border-radius: 4px; background: var(--hover); border: 1px solid var(--line); overflow: hidden; }
+.track b { position: absolute; inset: 0 auto 0 0; background: var(--onmain); }
+.track b.high { background: var(--reviewed); }
+.track b.full { background: var(--bad); }
+.track s { position: absolute; top: -1px; bottom: -1px; width: 2px; background: var(--ink); opacity: .35; }
+.foot { margin-top: 28px; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 16px; }
+
+/* Session panel */
+#veil { position: fixed; inset: 0; background: color-mix(in srgb, #000 35%, transparent); z-index: 20; }
+#panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(980px, 100%); background: var(--panel); border-left: 1px solid var(--line); z-index: 21; display: grid; grid-template-rows: auto 1fr auto; }
+.ph { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px max(16px, env(safe-area-inset-right, 0px)) 12px 16px; border-bottom: 1px solid var(--line); }
+.ph .t { font-weight: 650; flex: 1; min-width: 200px; overflow-wrap: anywhere; }
+.screen-box { position: relative; min-height: 0; }
+.screen-wrap { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: var(--term-bg); container-type: inline-size; }
+#screen { margin: 0; padding: 14px 16px; color: var(--term-fg); font: 12.5px/1.35 var(--mono); font-size: clamp(10px, calc((100cqw - 32px) / 72), 13px); white-space: pre-wrap; overflow-wrap: anywhere; min-height: 100%; }
+#p-tolive { position: absolute; right: 18px; bottom: 14px; box-shadow: 0 4px 14px rgb(0 0 0 / .35); }
+.pf { border-top: 1px solid var(--line); padding: 12px max(16px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) 16px; display: grid; gap: 10px; }
+.pf .state { font-size: 13px; color: var(--muted); }
+.pf textarea { width: 100%; min-height: 64px; resize: vertical; font: 14px/1.4 var(--mono); padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+.keys { display: flex; flex-wrap: wrap; gap: 6px; }
+.keys .btn { font-family: var(--mono); font-size: 12px; padding: 4px 9px; }
+</style>
+</head>
+<body>
+
+<div id="signin" hidden>
+  <div class="card">
+    <span class="mark"><i></i>Forge</span>
+    <div>
+      <h1>Sign in</h1>
+      <p>GitHub issues in, merged code out. Members only.</p>
+    </div>
+    <form id="email">
+      <input type="email" name="email" id="email-input" placeholder="you@example.com" autocomplete="email" required>
+      <button class="btn primary">Email me a code</button>
+    </form>
+    <form id="code" hidden>
+      <input name="code" id="code-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="······" autocomplete="one-time-code" required>
+      <button class="btn primary">Sign in</button>
+    </form>
+    <p id="msg"></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header class="top">
+    <span class="mark"><i></i>Forge</span>
+    <span class="pill" id="cap"></span>
+    <span class="grow"></span>
+    <span class="pill" id="who"></span>
+    <button class="btn" id="out">Sign out</button>
+  </header>
+  <section>
+    <h2>Waiting on you</h2>
+    <div id="waiting"></div>
+  </section>
+  <section id="repos"></section>
+  <section>
+    <h2>Claude plans</h2>
+    <div class="plans" id="plans"></div>
+  </section>
+  <div class="foot"><span id="updated"></span><span>Set up your machine: <code id="install">curl -fsSL /install.sh | sh</code></span></div>
+</div>
+
+<div id="veil" hidden></div>
+<aside id="panel" hidden aria-label="Session">
+  <div class="ph">
+    <span class="t" id="p-title"></span>
+    <span class="pill" id="p-live"></span>
+    <button class="btn" id="p-close">Close</button>
+  </div>
+  <div class="screen-box">
+    <div class="screen-wrap" id="screen-wrap"><pre id="screen"></pre></div>
+    <button class="btn primary" id="p-tolive" hidden>Paused · Back to live ↓</button>
+  </div>
+  <div class="pf">
+    <div class="state" id="p-state"></div>
+    <div id="p-free" hidden><button class="btn primary" id="p-take">Take control</button></div>
+    <div id="p-mine" hidden>
+      <textarea id="p-text" placeholder="Type to Claude. Enter sends; Shift+Enter for a new line."></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="p-send">Send</button>
+        <div class="keys">
+          <button class="btn" data-key="Escape">Esc</button>
+          <button class="btn" data-key="C-c">Ctrl-C</button>
+          <button class="btn" data-key="Enter">Enter</button>
+          <button class="btn" data-key="Up">↑</button>
+          <button class="btn" data-key="Down">↓</button>
+          <button class="btn" data-key="Tab">Tab</button>
+          <button class="btn" data-key="BTab">Shift-Tab</button>
+        </div>
+        <span class="grow"></span>
+        <button class="btn" id="p-release">Release control</button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
+const ext = (url, text) => /^https:\/\//.test(url || '') ? `<a href="${esc(url)}" target="_blank" rel="noopener">${text}</a>` : text;
+const when = t => t ? new Date(t).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+let challenge = null, timer = null, last = null, panel = null;
+$('install').textContent = `curl -fsSL ${location.origin}/install.sh | sh`;
+
+async function call(path, body) {
+  const opts = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
+  const r = await fetch(path, opts);
+  return { ok: r.ok, status: r.status, data: await r.json().catch(() => ({})) };
+}
+function say(text) { $('msg').textContent = text || ''; }
+function show(which) {
+  $('signin').hidden = which !== 'signin';
+  $('app').hidden = which !== 'app';
+}
+
+// ---- The board ----
+
+const COLS = [
+  ['asked', 'Asked', '--asked', 'Anyone asks'],
+  ['ready', 'Ready', '--ready', 'Orderer picks'],
+  ['building', 'Building', '--building', 'Claude works'],
+  ['reviewed', 'Reviewed', '--reviewed', 'Try, then accept'],
+  ['accepted', 'Accepted', '--accepted', 'Forge merges'],
+  ['on_main', 'On main', '--onmain', 'Latest'],
+];
+
+function card(repo, t, col, v, r) {
+  const chips = [t.role && `<span class="chip">${esc(t.role)}</span>`,
+    t.waiting_on && `<span class="chip hot">waiting on @${esc(t.waiting_on)}</span>`,
+    t.attached_by && `<span class="chip">@${esc(t.attached_by)} attached</span>`].filter(Boolean).join('');
+  const acts = [];
+  if (col === 'building') acts.push(`<button class="btn primary" data-open="${esc(repo)}#${t.issue}" data-title="${esc(t.title)}">Open session</button>`);
+  if (col === 'reviewed') acts.push(`<button class="btn warn" data-move="${esc(repo)}#${t.issue}" data-to="Accepted">Accept</button>`);
+  if ((col === 'asked' || col === 'backlog') && v.you && r.orderer && v.you.toLowerCase() === r.orderer.toLowerCase())
+    acts.push(`<button class="btn" data-move="${esc(repo)}#${t.issue}" data-to="Ready">Move to Ready</button>`);
+  if (t.pr_url) acts.push(ext(t.pr_url, '<span class="btn">PR</span>'));
+  return `<div class="task"><div class="t">${ext(t.url, `<span class="num">#${t.issue}</span>${esc(t.title)}`)}</div>` +
+    (chips ? `<div class="chips">${chips}</div>` : '') + (acts.length ? `<div class="row">${acts.join('')}</div>` : '') + '</div>';
+}
+
+function repoBoard(r, v) {
+  const cols = COLS.map(([key, name, color, hint]) => {
+    const xs = r[key] || [];
+    const body = xs.length ? xs.map(t => card(r.repo, t, key, v, r)).join('') : '<div class="none">Nothing here</div>';
+    return `<div class="col" style="--c: var(${color})"><div class="col-head">${name}<span class="n">${xs.length}</span><span class="hint">${hint}</span></div>${body}</div>`;
+  }).join('');
+  const e = r.last_e2e;
+  const e2e = !e ? 'No e2e runs yet' : `Last e2e ${e.passed == null ? 'running' : e.passed ? 'passed' : 'failed'} ${when(e.finished_at || e.started_at)}`;
+  const parked = r.backlog || [];
+  const backlog = `<details class="backlog"><summary>Backlog <span class="n">${parked.length}</span> <span class="muted">parked; Forge leaves these until they move to Ready</span></summary>` +
+    (parked.length ? `<div class="parked">${parked.map(t => card(r.repo, t, 'backlog', v, r)).join('')}</div>` : '<div class="none">Nothing parked.</div>') + '</details>';
+  return `<h2>${esc(r.repo)} <span style="text-transform:none;letter-spacing:0;font-weight:400"> · ${esc(e2e)}</span></h2><div class="board">${cols}</div>${backlog}`;
+}
+
+function waitingCard(w) {
+  const verify = w.why === 'verify';
+  const label = verify ? 'Verify' : w.why === 'question' ? 'Question' : 'Blocked';
+  const acts = verify
+    ? `<code>forge try ${w.issue}</code><button class="btn warn" data-move="${esc(w.repo)}#${w.issue}" data-to="Accepted">Accept</button>`
+    : ext(w.url, '<span class="btn">Answer on the issue</span>');
+  return `<div class="wait ${esc(w.why)}"><div class="chips"><span class="chip hot">${label}</span><span class="chip">${esc(w.repo)}</span></div>` +
+    `<div class="t">${ext(w.url, `#${w.issue} ${esc(w.title)}`)}</div>` + (verify ? '' : `<div class="d">${esc(w.detail)}</div>`) + `<div class="row">${acts}</div></div>`;
+}
+
+function planCard(p) {
+  const l = p.limits || {};
+  const bar = (label, pct, cap) => {
+    const v = pct == null ? null : Math.max(0, Math.min(100, pct));
+    const cls = v == null ? '' : v >= cap ? 'full' : v >= cap - 15 ? 'high' : '';
+    return `<div class="bar"><span>${label}</span><span class="track"><b class="${cls}" style="width:${v ?? 0}%"></b><s style="left:${cap}%"></s></span><span>${v == null ? '?' : Math.round(v) + '%'}</span></div>`;
+  };
+  const note = p.out_until ? `out until ${when(p.out_until)}` : p.at_ceiling ? 'at its cap' : 'in use';
+  return `<div class="plan"><div class="name">${esc(p.label)}<span class="muted" style="font-weight:400;font-size:12.5px">${esc(note)}</span></div>` +
+    bar('5 hours', l.five_hour_pct, 85) + bar('Week', l.week_pct, 90) + '</div>';
+}
+
+function render(v) {
+  last = v;
+  const building = v.repos.reduce((n, r) => n + r.building.length, 0);
+  const capacity = v.repos.reduce((n, r) => n + r.concurrency, 0);
+  $('cap').innerHTML = `<span class="dot ${building ? 'busy' : ''}"></span>${building} of ${capacity} building`;
+  $('who').textContent = v.you ? '@' + v.you : '';
+  $('waiting').innerHTML = v.waiting_on_you.length
+    ? `<div class="waiting">${v.waiting_on_you.map(waitingCard).join('')}</div>`
+    : '<div class="empty">Nothing waits on you. Ask for a task with <code>forge new "…"</code> or your Claude.</div>';
+  $('repos').innerHTML = v.repos.map(r => repoBoard(r, v)).join('');
+  $('plans').innerHTML = v.pool.map(planCard).join('') || '<div class="empty">No plans.</div>';
+  $('updated').textContent = 'Updated ' + when(v.generated_at) + ' · refreshes every 15 s';
+}
+
+async function load() {
+  timer = timer || setInterval(load, 15000);
+  let r;
+  try { r = await call('/api/status'); } catch { $('updated').textContent = 'Can’t reach Forge. Trying again.'; return; }
+  if (r.status === 401) { clearInterval(timer); timer = null; show('signin'); $('code').hidden = !challenge; $('email').hidden = !!challenge; return; }
+  if (!r.ok) { $('updated').textContent = r.data.error || 'Couldn’t load the status.'; return; }
+  show('app');
+  render(r.data);
+}
+
+// Accept and Move to Ready ask once more on the button itself.
+document.addEventListener('click', async e => {
+  const mv = e.target.closest('[data-move]');
+  if (mv) {
+    if (!mv.dataset.sure) { mv.dataset.sure = '1'; mv.textContent = 'Sure? ' + mv.dataset.to; setTimeout(() => { delete mv.dataset.sure; mv.textContent = mv.dataset.to === 'Ready' ? 'Move to Ready' : 'Accept'; }, 4000); return; }
+    const [repo, n] = mv.dataset.move.split('#');
+    mv.disabled = true;
+    const r = await call(`/api/tasks/${repo}/${n}/status`, { status: mv.dataset.to }).catch(() => null);
+    mv.textContent = r && r.ok ? (mv.dataset.to === 'Accepted' ? 'Accepted' : 'Ready') : (r?.data.error || 'Failed');
+    setTimeout(load, 1500);
+    return;
+  }
+  const op = e.target.closest('[data-open]');
+  if (op) openPanel(op.dataset.open, op.dataset.title);
+});
+
+// ---- Sign-in ----
+
+$('email').onsubmit = async e => {
+  e.preventDefault();
+  const email = $('email-input').value.trim();
+  const r = await call('/api/signin', { email }).catch(() => null);
+  if (!r || !r.ok) return say(r?.data.error || 'Couldn’t send a code. Try again.');
+  challenge = r.data.challenge;
+  $('email').hidden = true; $('code').hidden = false;
+  say('If ' + email + ' is a member, a code is on its way.');
+  $('code-input').focus();
+};
+$('code').onsubmit = async e => {
+  e.preventDefault();
+  const r = await call('/api/signin/verify', { challenge, code: $('code-input').value.trim() }).catch(() => null);
+  $('code-input').value = '';
+  if (r && r.ok) { challenge = null; say(''); return load(); }
+  if (r && r.status === 429) { challenge = null; $('code').hidden = true; $('email').hidden = false; }
+  say(r?.data.error || 'That didn’t work. Try again.');
+};
+$('out').onclick = async () => {
+  await call('/api/signout', {}).catch(() => null);
+  challenge = null; say('Signed out.');
+  load();
+};
+
+// ---- A session: its live screen, and a keyboard for whoever has control ----
+
+const PALETTE = ['#1d2321', '#e5534b', '#57ab5a', '#c69026', '#539bf5', '#b083f0', '#39c5cf', '#c5d1de',
+  '#636e7b', '#ff938a', '#6bc46d', '#daaa3f', '#6cb6ff', '#dcbdfb', '#56d4dd', '#f0f6fc'];
+function color256(n) {
+  if (n < 16) return PALETTE[n];
+  if (n >= 232) { const g = 8 + (n - 232) * 10; return `rgb(${g},${g},${g})`; }
+  n -= 16; const c = x => x ? 55 + x * 40 : 0;
+  return `rgb(${c(Math.floor(n / 36))},${c(Math.floor(n / 6) % 6)},${c(n % 6)})`;
+}
+// tmux's screen with its SGR colours, as HTML.
+function ansi(text) {
+  let out = '', st = {}, open = false;
+  const style = () => {
+    const css = [];
+    let fg = st.fg, bg = st.bg;
+    if (st.rev) [fg, bg] = [bg || 'var(--term-bg)', fg || 'var(--term-fg)'];
+    if (fg) css.push('color:' + fg);
+    if (bg) css.push('background:' + bg);
+    if (st.b) css.push('font-weight:700');
+    if (st.dim) css.push('opacity:.6');
+    if (st.i) css.push('font-style:italic');
+    if (st.u) css.push('text-decoration:underline');
+    return css.join(';');
+  };
+  const parts = text.split(/(\x1b\[[0-9;:]*m)/);
+  for (const p of parts) {
+    const m = /^\x1b\[([0-9;:]*)m$/.exec(p);
+    if (!m) { out += esc(p.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')); continue; }
+    const codes = m[1] === '' ? [0] : m[1].split(/[;:]/).map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      if (c === 0) st = {};
+      else if (c === 1) st.b = true; else if (c === 2) st.dim = true; else if (c === 3) st.i = true;
+      else if (c === 4) st.u = true; else if (c === 7) st.rev = true;
+      else if (c === 22) { st.b = false; st.dim = false; } else if (c === 23) st.i = false;
+      else if (c === 24) st.u = false; else if (c === 27) st.rev = false;
+      else if (c >= 30 && c <= 37) st.fg = PALETTE[c - 30]; else if (c >= 90 && c <= 97) st.fg = PALETTE[c - 82];
+      else if (c >= 40 && c <= 47) st.bg = PALETTE[c - 40]; else if (c >= 100 && c <= 107) st.bg = PALETTE[c - 92];
+      else if (c === 39) delete st.fg; else if (c === 49) delete st.bg;
+      else if ((c === 38 || c === 48) && codes[i + 1] === 5) { st[c === 38 ? 'fg' : 'bg'] = color256(codes[i + 2]); i += 2; }
+      else if ((c === 38 || c === 48) && codes[i + 1] === 2) { st[c === 38 ? 'fg' : 'bg'] = `rgb(${codes[i + 2]},${codes[i + 3]},${codes[i + 4]})`; i += 4; }
+    }
+    if (open) out += '</span>';
+    const css = style();
+    open = !!css;
+    if (css) out += `<span style="${css}">`;
+  }
+  return out + (open ? '</span>' : '');
+}
+
+// Live, the panel shows the last LIVE lines and follows the bottom. Scrolled up, it pauses and
+// loads up to FULL lines once, keeping your place, until you go back to live.
+const LIVE = 400, FULL = 10000;
+function openPanel(key, title) {
+  const [repo, n] = key.split('#');
+  panel = { repo, n, poll: null, paused: false, full: false };
+  $('p-title').textContent = `#${n} ${title || ''}`;
+  $('screen').textContent = 'Loading…';
+  $('p-tolive').hidden = true;
+  $('panel').hidden = false; $('veil').hidden = false;
+  refreshPanel();
+  panel.poll = setInterval(refreshPanel, 1000);
+}
+function closePanel() {
+  if (panel) clearInterval(panel.poll);
+  panel = null;
+  $('panel').hidden = true; $('veil').hidden = true;
+}
+function controlState(d) {
+  $('p-free').hidden = !d.live || !!d.holder;
+  $('p-mine').hidden = !d.live || !d.mine;
+  $('p-state').textContent = !d.live ? 'No live session for this task right now.'
+    : d.mine ? 'You have control. Others are watching read-only; it frees after 10 idle minutes.'
+    : d.holder ? `${d.holder.name} has control. You're watching read-only.`
+    : 'Watching read-only. Take control to type to Claude; one person at a time.';
+}
+const screenUrl = lines => `/api/tasks/${panel.repo}/${panel.n}/screen?history=${lines}`;
+// Draws the screen, at the bottom or where the reader was, counted from the bottom.
+function drawScreen(d, follow) {
+  const w = $('screen-wrap'), fromBottom = w.scrollHeight - w.scrollTop;
+  $('screen').innerHTML = d.live ? ansi(d.screen.replace(/ +(?=\n|$)/g, '').replace(/\s+$/, '')) : '';
+  w.scrollTop = follow ? w.scrollHeight : w.scrollHeight - fromBottom;
+}
+async function refreshPanel() {
+  if (!panel || document.hidden) return;
+  const paused = panel.paused;
+  const r = await call(screenUrl(paused ? 0 : LIVE)).catch(() => null);
+  if (!panel || !r) return;
+  if (!r.ok) { $('p-state').textContent = r.data.error || 'Couldn’t read the session.'; return; }
+  if (!paused && !panel.paused) drawScreen(r.data, true);
+  $('p-live').innerHTML = r.data.live ? '<span class="dot busy"></span>Live' : 'Not running';
+  controlState(r.data);
+}
+async function loadHistory() {
+  panel.full = true;
+  const r = await call(screenUrl(FULL)).catch(() => null);
+  if (panel && r && r.ok && panel.paused) drawScreen(r.data, false);
+}
+function goLive() {
+  if (!panel) return;
+  panel.paused = false; panel.full = false;
+  $('p-tolive').hidden = true;
+  refreshPanel();
+}
+$('screen-wrap').addEventListener('scroll', () => {
+  if (!panel) return;
+  const w = $('screen-wrap'), up = w.scrollTop + w.clientHeight < w.scrollHeight - 8;
+  if (up === panel.paused) return;
+  if (!up) return goLive();
+  panel.paused = true;
+  $('p-tolive').hidden = false;
+  if (!panel.full) loadHistory();
+});
+$('p-tolive').onclick = goLive;
+async function control(take) {
+  const r = await call(`/api/tasks/${panel.repo}/${panel.n}/control`, { take }).catch(() => null);
+  if (r && !r.ok) $('p-state').textContent = r.data.error;
+  refreshPanel();
+  if (take && r && r.ok) $('p-text').focus();
+}
+async function send(body) {
+  const r = await call(`/api/tasks/${panel.repo}/${panel.n}/input`, body).catch(() => null);
+  if (r && !r.ok) $('p-state').textContent = r.data.error;
+  setTimeout(refreshPanel, 250);
+  return r && r.ok;
+}
+$('p-close').onclick = closePanel;
+$('veil').onclick = closePanel;
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && panel && document.activeElement !== $('p-text')) closePanel(); });
+$('p-take').onclick = () => control(true);
+$('p-release').onclick = () => control(false);
+$('p-send').onclick = async () => { const text = $('p-text').value; if (text.trim() && await send({ text, submit: true })) $('p-text').value = ''; };
+$('p-text').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('p-send').click(); } });
+document.querySelectorAll('[data-key]').forEach(b => b.onclick = () => send({ key: b.dataset.key }));
+
+load();
+</script>
+</body>
+</html>

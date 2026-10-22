@@ -1,0 +1,15 @@
+[Unit]
+Description=Forge: refresh who may attach (keys of collaborators who can push)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# forge reads the App key and writes the list; root only puts it in place, since
+# sshd reads it as forge-run and it must stay out of forge-run's reach.
+User=forge
+Group=forge
+Environment=FORGE_CONFIG=/etc/forge/forge.toml
+ExecStart=/usr/local/bin/forge keys --out /var/lib/forge/state/forge-run.keys
+# Root copies only a plain file: never a link forge could point at another file.
+# ($$ keeps systemd from expanding the shell's variable itself.)
+ExecStartPost=+/bin/sh -c 'f=/var/lib/forge/state/forge-run.keys; [ -f "$$f" ] && [ ! -L "$$f" ] && /usr/bin/install -o root -g root -m 644 "$$f" /etc/forge/ssh/forge-run.keys'

@@ -1,0 +1,29 @@
+name: No team specifics
+# Forge is shared: no organisation, repo, person, plan, domain or box of anyone
+# who runs it belongs here (BUILD.md). The terms to refuse are the
+# FORBIDDEN_TERMS secret, one per line, so this public file doesn't list them;
+# a hit prints only the file's name. LICENSE names the copyright holder, so it's skipped.
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse team-specific terms
+        env:
+          TERMS: ${{ secrets.FORBIDDEN_TERMS }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$TERMS" ]; then
+            # Pull requests from forks get no secrets; pushes here always do.
+            [ "$EVENT" = pull_request ] && { echo "No term list for pull requests from forks."; exit 0; }
+            echo "::error::The FORBIDDEN_TERMS secret isn't set."; exit 1
+          fi
+          printf '%s\n' "$TERMS" | sed '/^[[:space:]]*$/d' > "$RUNNER_TEMP/terms"
+          if git grep -l -i -F -f "$RUNNER_TEMP/terms" -- . ':!LICENSE'; then
+            echo "::error::The files above hold team-specific terms."; exit 1
+          fi

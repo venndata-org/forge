@@ -1,0 +1,84 @@
+# /etc/forge/forge.toml on the Forge box. Lines marked TODO need a real value
+# before `forge check-config` passes. Secrets are files under /etc/forge, mode 600,
+# owned by the forge user; nothing secret goes in this file.
+
+listen = "127.0.0.1:8470"            # Caddy serves it as public_url
+internal_listen = "127.0.0.1:8472"   # forge attach-gate only
+public_url = "https://forge.example.com"   # TODO
+data_dir = "/var/lib/forge"
+poll_seconds = 30
+
+[claude]
+bin = "/usr/local/bin/claude"
+session_user = "forge-run"           # sessions can't read /etc/forge
+proxy_listen = "127.0.0.1:8471"
+burst_timeout_minutes = 240
+forge_bin = "/usr/local/bin/forge"
+
+[github]
+app_id = 0                           # TODO: the GitHub App's id
+app_slug = "example-forge"           # TODO
+private_key_file = "/etc/forge/github-app.pem"
+installation_id = 0                  # TODO: its installation on the org
+
+[pool]
+five_hour_cap = 85.0
+week_cap = 90.0
+plans = [
+  { label = "main", token_file = "/etc/forge/plans/main" },
+]
+
+[telegram]
+bot_token_file = "/etc/forge/telegram-token"
+chat_id = "TODO"                     # the team chat's id
+
+[mail]
+resend_api_key_file = "/etc/forge/resend-key"
+from = "Forge <forge@example.com>"   # TODO
+
+[auth]
+secret_file = "/etc/forge/auth-secret"
+session_days = 14
+
+[[repos]]
+name = "example-team/shop"           # TODO
+project_owner = "example-team"
+project_number = 1                   # the repo's Project
+default_branch = "main"
+concurrency = 1                      # start with one task; raise by hand
+orderer = "ann-gh"                   # TODO: the GitHub login who orders Ready
+default_role = "backend"
+run = "TODO"                         # starts the app for `forge try`
+stop = "TODO"                        # forge stop: stops what run started
+seed = "TODO"                        # loads synthetic data
+# Runs as forge-run on an export of the rebased change (no .git).
+merge_check = "TODO"
+notes = """
+Work is tracked on this GitHub issue and run by Forge. Ask questions in your
+final forge block. Run the full test suite through `$FORGE_BIN slot --` before
+you finish, and say in the PR body what ran and that it passed.
+"""
+members = [
+  { github = "ann-gh", email = "ann@example.com", name = "Ann" },
+  { github = "bob-gh", email = "bob@example.com", name = "Bob" },
+]
+
+[repos.e2e]
+command = "TODO"                     # the live e2e command
+every_hours = 4
+staging_url = "TODO"
+
+[repos.roles.backend]
+prompt_file = "/etc/forge/prompts/backend.md"
+model = "claude-opus-5-5"
+effort = "xhigh"
+
+[repos.roles.ui]
+prompt_file = "/etc/forge/prompts/ui.md"
+model = "claude-opus-5-5"
+effort = "xhigh"
+
+[repos.roles.review]
+prompt_file = "/etc/forge/prompts/review.md"
+model = "claude-opus-5-5"
+effort = "xhigh"

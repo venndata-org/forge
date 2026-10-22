@@ -1,0 +1,21 @@
+[Unit]
+Description=Forge: the tmux server where each task's Claude runs (watch and attach join it)
+After=network-online.target
+Before=forge.service
+
+[Service]
+User=forge-run
+Group=forge-work
+UMask=0007
+# Its own service, so restarting Forge leaves running sessions alone.
+ExecStartPre=+/usr/bin/install -d -o forge -g forge-work -m 2770 /var/lib/forge/sessions
+ExecStart=/usr/bin/tmux -S /var/lib/forge/sessions/tmux.sock -D
+Restart=always
+RestartSec=5
+# A build the kernel kills for memory takes only itself, not every session.
+OOMPolicy=continue
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

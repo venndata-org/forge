@@ -1,0 +1,21 @@
+[Unit]
+Description=Forge: GitHub issues to merged code
+After=network-online.target forge-tmux.service
+Wants=network-online.target forge-tmux.service
+
+[Service]
+User=forge
+Group=forge
+Environment=FORGE_CONFIG=/etc/forge/forge.toml
+Environment=RUST_LOG=forge=info
+ExecStart=/usr/local/bin/forge serve
+Restart=always
+UMask=0007
+RestartSec=5
+# Sessions run through sudo as forge-run, so NoNewPrivileges must stay off.
+ProtectSystem=full
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

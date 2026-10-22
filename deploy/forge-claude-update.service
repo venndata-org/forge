@@ -1,0 +1,7 @@
+[Unit]
+Description=Forge: update the root-owned Claude Code its sessions run
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/forge-claude-update

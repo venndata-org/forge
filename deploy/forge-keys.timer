@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Forge attach keys hourly
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
