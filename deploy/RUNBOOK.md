@@ -48,6 +48,12 @@ written on the box, by the person who owns it.
    export each time, so they install their own dependencies. Don't add
    forge-run to the docker group: that would let a session read the plan
    logins. Use rootless Docker for forge-run if builds need containers.
+   With rootless Docker, set `DOCKER_HOST` to
+   `unix:///run/user/<forge-run's uid>/docker.sock` under `env` in forge-run's
+   `~/.claude/settings.json`, so sessions find it. Any wrapper you put in
+   `/usr/local/bin` (rustup's proxies, say) must be bash, not sh: dash drops
+   environment variables whose names have hyphens, such as cargo's
+   `CARGO_BIN_EXE_<name>`, and tests that use them stop compiling.
 3. Build Forge (`cargo build --release` in this repo) and install
    `target/release/forge` as `/usr/local/bin/forge` (root, 755).
 4. Copy `prompts/*.md` to `/etc/forge/prompts/` and `deploy/example.forge.toml`
