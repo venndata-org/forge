@@ -241,6 +241,10 @@ End your final message with exactly one block:
 ```
 
 or `{"outcome": "question", "text": "..."}` when you need a person, or `{"outcome": "blocked", "reason": "..."}` when you can't go on.
+
+People read these on GitHub, so keep them short and plain. A question or a reason: one or two sentences, then the \
+options as a short list if there are any. A PR body: what changed in two to four bullets, then a `Checked:` line \
+saying what ran and whether it passed, then anything a person must do at the merge.
 "#;
 
 const REVIEW_ENDING: &str = r#"## How to end
@@ -248,10 +252,17 @@ const REVIEW_ENDING: &str = r#"## How to end
 End your final message with exactly one block:
 
 ```forge
-{"outcome": "review", "pass": true, "notes": "..."}
+{"outcome": "review", "pass": true, "summary": "...", "checked": "...", "needs_you": ["..."], "try": ["..."], "notes": "..."}
 ```
 
-Use `"pass": false` when the change needs work, and say what in the notes.
+A passing review becomes a GitHub comment in a fixed layout, so keep each field short and plain:
+- `summary`: one sentence, at most 25 words: what the change does now.
+- `checked`: one line: what ran and whether it passed.
+- `needs_you`: what a person must do or decide at the merge, one line each; `[]` when nothing.
+- `try`: at most three steps to see it work, one line each.
+- `notes`: anything else (nits, details); it is folded away under the comment.
+
+Use `"pass": false` when the change needs work; then `notes` says what to change, for the session that fixes it.
 "#;
 
 /// The role's prompt, the task, the rules and the repo's notes.
@@ -699,7 +710,8 @@ mod tests {
             "`$FORGE_BIN slot -- <build command>`",
             "use synthetic data only",
             "Use ISO dates.",
-            "```forge\n{\"outcome\": \"review\", \"pass\": true, \"notes\": \"...\"}\n```",
+            "```forge\n{\"outcome\": \"review\", \"pass\": true, \"summary\": \"...\", \"checked\": \"...\", \"needs_you\": [\"...\"], \"try\": [\"...\"], \"notes\": \"...\"}\n```",
+            "`summary`: one sentence, at most 25 words",
         ] {
             assert!(p.contains(part), "missing {part:?} in:\n{p}");
         }
@@ -711,7 +723,18 @@ mod tests {
         let text = "First:\n```forge\n{\"outcome\":\"question\",\"text\":\"a?\"}\n```\nThen:\n```json\n{}\n```\n\n```forge\n{\"outcome\": \"pr\", \"title\": \"T\",\n \"body\": \"B\"}\n```\nBye.";
         assert_eq!(parse_outcome(text), Outcome::Pr { title: "T".into(), body: "B".into() });
         let review = "```forge\n{\"outcome\":\"review\",\"pass\":false,\"notes\":\"n\"}\n```";
-        assert_eq!(parse_outcome(review), Outcome::Review { pass: false, notes: "n".into() });
+        let fail = Outcome::Review {
+            pass: false,
+            notes: "n".into(),
+            summary: String::new(),
+            checked: String::new(),
+            needs_you: vec![],
+            try_steps: vec![],
+        };
+        assert_eq!(parse_outcome(review), fail);
+        let pass = "```forge\n{\"outcome\":\"review\",\"pass\":true,\"summary\":\"s\",\"try\":[\"a\"]}\n```";
+        let Outcome::Review { summary, try_steps, notes, .. } = parse_outcome(pass) else { panic!("not a review") };
+        assert_eq!((summary.as_str(), try_steps, notes.as_str()), ("s", vec!["a".to_string()], ""));
         let unclosed = "```forge\n{\"outcome\":\"blocked\",\"reason\":\"no db\"}";
         assert_eq!(parse_outcome(unclosed), Outcome::Blocked { reason: "no db".into() });
     }

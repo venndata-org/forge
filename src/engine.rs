@@ -452,15 +452,15 @@ impl Engine {
             warn!(task = %tag(task), "can't remove the review checkout: {e:#}");
         }
         match verdict(&result) {
-            Outcome::Review { pass: true, notes } => self.passed(job, sha, &notes).await,
-            Outcome::Review { pass: false, notes } => self.failed_review(job, notes).await,
+            review @ Outcome::Review { pass: true, .. } => self.passed(job, sha, &review).await,
+            Outcome::Review { pass: false, notes, .. } => self.failed_review(job, notes).await,
             Outcome::Blocked { reason } => bail!("the review run failed: {reason}"),
             other => bail!("the review run ended with a {} block, not a verdict", other.kind()),
         }
     }
 
     /// The review of `sha` passed: the task waits for a person to verify it.
-    async fn passed(&self, job: &Job<'_>, sha: &str, notes: &str) -> Result<()> {
+    async fn passed(&self, job: &Job<'_>, sha: &str, review: &Outcome) -> Result<()> {
         let (repo, task, n) = (job.repo, &job.task, job.task.issue);
         self.db.kv_set(&sha_key(REVIEWED, task), sha)?;
         self.move_to(repo, job.item_id, task, Status::Reviewed, |t| {
@@ -469,7 +469,7 @@ impl Engine {
         })
         .await?;
         let head = format!("@{} ready to verify: `forge try {n}`", self.person(repo, task).await);
-        self.comment(task, &with_notes(&head, notes)).await;
+        self.comment(task, &verify_comment(&head, review)).await;
         self.ping(&format!("{} ready to verify: forge try {n} {}", tag(task), issue_url(&task.repo, n))).await;
         Ok(())
     }
@@ -487,7 +487,11 @@ impl Engine {
         }
         // A person steps in now; once they answer, the rounds start over.
         self.update(&task, |t| t.review_rounds = 0)?;
-        let reason = with_notes(&format!("review failed {MAX_REVIEW_ROUNDS} times"), &notes);
+        let head = format!("review failed {MAX_REVIEW_ROUNDS} times");
+        let reason = match folded("The last review's notes", &notes) {
+            Some(notes) => format!("{head}\n\n{notes}"),
+            None => head,
+        };
         self.block(job.repo, &task, &reason).await
     }
 
@@ -823,12 +827,32 @@ fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or("").trim().chars().take(200).collect()
 }
 
-fn with_notes(head: &str, notes: &str) -> String {
-    if notes.trim().is_empty() {
-        head.to_string()
-    } else {
-        format!("{head}\n\n{}", notes.trim())
+/// The comment a passed review leaves: who verifies and how, then the
+/// reviewer's fields in one layout, each item on one line, its notes folded away.
+fn verify_comment(head: &str, review: &Outcome) -> String {
+    let Outcome::Review { notes, summary, checked, needs_you, try_steps, .. } = review else { return head.to_string() };
+    let line = |s: &String| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let items = |list: &[String]| list.iter().map(line).filter(|s| !s.is_empty()).collect::<Vec<_>>();
+    let mut parts = vec![head.to_string()];
+    parts.extend(Some(line(summary)).filter(|s| !s.is_empty()));
+    parts.extend(Some(line(checked)).filter(|s| !s.is_empty()).map(|s| format!("**Checked:** {s}")));
+    let needs = items(needs_you);
+    if !needs.is_empty() {
+        parts.push(format!("**Needs you**\n{}", needs.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n")));
     }
+    let steps = items(try_steps);
+    if !steps.is_empty() {
+        let steps: Vec<String> = steps.iter().enumerate().map(|(i, s)| format!("{}. {s}", i + 1)).collect();
+        parts.push(format!("**To try**\n{}", steps.join("\n")));
+    }
+    parts.extend(folded("Review notes", notes));
+    parts.join("\n\n")
+}
+
+/// `text` folded under `summary`: detail people open only if they want it.
+fn folded(summary: &str, text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| format!("<details><summary>{summary}</summary>\n\n{text}\n\n</details>"))
 }
 
 fn tail(text: &str, lines: usize) -> String {
@@ -1046,7 +1070,14 @@ mod tests {
     }
 
     fn review(pass: bool, notes: &str) -> Step {
-        Step::Says(Outcome::Review { pass, notes: notes.into() })
+        Step::Says(Outcome::Review {
+            pass,
+            notes: notes.into(),
+            summary: String::new(),
+            checked: String::new(),
+            needs_you: vec![],
+            try_steps: vec![],
+        })
     }
 
     // ---- Git ----
@@ -1524,7 +1555,10 @@ mod tests {
         assert_eq!(task.session_id.as_deref(), Some("backend-1"), "the review session isn't kept");
         assert_eq!((task.review_rounds, task.bursts, task.pending), (0, 2, None));
         assert_eq!(w.gh.gh().moves, vec![(1, Status::Building), (1, Status::Reviewed)]);
-        assert_eq!(w.gh.bodies(1), vec!["@alice ready to verify: `forge try 1`\n\nDoes what #1 asks."]);
+        assert_eq!(
+            w.gh.bodies(1),
+            vec!["@alice ready to verify: `forge try 1`\n\n<details><summary>Review notes</summary>\n\nDoes what #1 asks.\n\n</details>"]
+        );
         assert_eq!(w.pings(), vec![format!("{REPO}#1 ready to verify: forge try 1 {URL}")]);
     }
 
@@ -1574,7 +1608,10 @@ mod tests {
         for _ in 0..3 {
             w.tick().await;
         }
-        assert_eq!(w.gh.bodies(1), vec!["@alice Blocked: review failed 3 times\n\nStill two helpers."]);
+        assert_eq!(
+            w.gh.bodies(1),
+            vec!["@alice Blocked: review failed 3 times\n\n<details><summary>The last review's notes</summary>\n\nStill two helpers.\n\n</details>"]
+        );
         let task = w.task(1);
         assert_eq!((task.status, task.pending, task.review_rounds), (Status::Building, None, 0));
         assert_eq!(task.waiting_on.as_deref(), Some("alice"));
@@ -1885,5 +1922,26 @@ mod tests {
 
         stop.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(1), looping).await.expect("run stopped").unwrap();
+    }
+
+    #[test]
+    fn a_passed_review_reads_in_one_layout() {
+        let review = Outcome::Review {
+            pass: true,
+            notes: "get_json has one caller now.\nFold it in later.".into(),
+            summary: "openapi.json is built when the checks run,\n  not committed.".into(),
+            checked: "fmt, clippy, client tests: pass".into(),
+            needs_you: vec!["Add crates/** to admin-tests.yml's triggers.".into(), " ".into()],
+            try_steps: vec!["Run `npm --prefix admin test`.".into(), "Rename a route; the contract test fails.".into()],
+        };
+        assert_eq!(
+            verify_comment("@ann ready to verify: `forge try 7`", &review),
+            "@ann ready to verify: `forge try 7`\n\n\
+             openapi.json is built when the checks run, not committed.\n\n\
+             **Checked:** fmt, clippy, client tests: pass\n\n\
+             **Needs you**\n- Add crates/** to admin-tests.yml's triggers.\n\n\
+             **To try**\n1. Run `npm --prefix admin test`.\n2. Rename a route; the contract test fails.\n\n\
+             <details><summary>Review notes</summary>\n\nget_json has one caller now.\nFold it in later.\n\n</details>"
+        );
     }
 }

@@ -175,8 +175,25 @@ pub enum Outcome {
     Question { text: String },
     /// The session can't go on, and says why.
     Blocked { reason: String },
-    /// A review session's verdict.
-    Review { pass: bool, notes: String },
+    /// A review session's verdict. A pass is shown to people in one layout
+    /// (`engine::verify_comment`); a fail's `notes` go to the session that fixes it.
+    Review {
+        pass: bool,
+        #[serde(default)]
+        notes: String,
+        /// One sentence: what the change does now.
+        #[serde(default)]
+        summary: String,
+        /// One line: what ran and whether it passed.
+        #[serde(default)]
+        checked: String,
+        /// What a person must do or decide at the merge, one line each.
+        #[serde(default)]
+        needs_you: Vec<String>,
+        /// Steps to see it work, one line each.
+        #[serde(default, rename = "try")]
+        try_steps: Vec<String>,
+    },
 }
 
 impl Outcome {
