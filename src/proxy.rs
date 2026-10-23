@@ -10,10 +10,11 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::{AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 
@@ -115,6 +116,8 @@ pub struct ProxyState {
     /// e.g. "https://api.anthropic.com"
     pub upstream: String,
     pub client: reqwest::Client,
+    /// Sessions' asks to paired machines (`forge local`).
+    pub pairs: crate::pair::Pairs,
 }
 
 /// Headers that belong to one connection, never passed on (RFC 9110 7.6.1).
@@ -142,9 +145,19 @@ const RATE_LIMITED_FOR: Duration = Duration::minutes(5);
 const LOGIN_REFUSED_FOR: Duration = Duration::hours(1);
 
 /// Forwards every method and path. Requests without a live key get 401;
-/// with every plan out or at a ceiling, 529 with a JSON error body.
+/// with every plan out or at a ceiling, 529 with a JSON error body. One path
+/// is Forge's own: `POST /forge/local`, a session's ask to a paired machine.
 pub fn router(state: ProxyState) -> Router {
-    Router::new().fallback(forward).with_state(state)
+    let ask_limit = DefaultBodyLimit::max(crate::pair::PATCH_LIMIT * 4 / 3 + (64 << 10));
+    Router::new()
+        .route("/forge/local", post(local).layer(ask_limit))
+        .fallback(forward)
+        .with_state(state)
+}
+
+async fn local(State(state): State<ProxyState>, headers: HeaderMap, body: Bytes) -> Response {
+    let tag = keys_offered(&headers).find_map(|key| state.keys.tag(key));
+    crate::pair::session_ask(&state.pairs, tag, body).await
 }
 
 pub async fn serve(addr: SocketAddr, state: ProxyState) -> Result<()> {
@@ -477,6 +490,7 @@ mod tests {
             db: Arc::new(Db::open_in_memory().unwrap()),
             upstream: format!("http://{addr}/"),
             client: reqwest::Client::new(),
+            pairs: Default::default(),
         };
         Setup { state, key, up }
     }

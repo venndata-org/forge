@@ -92,6 +92,16 @@ enum Command {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Let a task's session ask a Claude on this machine to work with files in these folders, until Ctrl-C.
+    Pair {
+        issue: u64,
+        #[arg(required = true)]
+        folders: Vec<PathBuf>,
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// In a session: ask the Claude on the paired machine, sending it this worktree's code ("-" reads stdin).
+    Local { ask: String },
     /// Join a task's live Claude session (its tmux session).
     Attach {
         issue: u64,
@@ -167,6 +177,8 @@ async fn run(command: Command) -> Result<()> {
         Command::Backlog { issue, repo } => forge::cli::cmd_move(repo, issue, "Backlog").await,
         Command::Attach { issue, repo } => forge::cli::cmd_attach(repo, issue).await,
         Command::Watch { issue, repo } => forge::cli::cmd_watch(repo, issue).await,
+        Command::Pair { issue, folders, repo } => forge::pair::cmd_pair(repo, issue, folders).await,
+        Command::Local { ask } => forge::pair::cmd_local(ask).await,
         Command::Mcp => {
             let cfg = forge::cli::ClientConfig::load()?;
             forge::mcp::serve_stdio(forge::cli::Client::from_config(&cfg)?).await
@@ -258,6 +270,7 @@ async fn serve(cfg: Config) -> Result<()> {
         db: db.clone(),
         upstream: cfg.pool.upstream.clone(),
         client: reqwest::Client::new(),
+        pairs: Default::default(),
     };
     // Every plan's usage stays known, for the dashboard and the pool's choices.
     let checks = proxy_state.clone();
@@ -268,8 +281,17 @@ async fn serve(cfg: Config) -> Result<()> {
         }
     });
     let engine = Arc::new(engine::Engine::new(cfg.clone(), db.clone(), gh.clone(), runner, git, notifier, keys.clone()));
-    let api_state =
-        api::ApiState { cfg: cfg.clone(), db: db.clone(), auth, pool: pool.clone(), keys, busy: engine.busy(), gh: gh.clone(), control: Default::default() };
+    let api_state = api::ApiState {
+        cfg: cfg.clone(),
+        db: db.clone(),
+        auth,
+        pool: pool.clone(),
+        keys,
+        busy: engine.busy(),
+        gh: gh.clone(),
+        control: Default::default(),
+        pairs: proxy_state.pairs.clone(),
+    };
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let proxy_addr = cfg.claude.proxy_listen.parse().context("claude.proxy_listen")?;

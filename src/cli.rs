@@ -170,11 +170,11 @@ impl Client {
         self.get(&format!("/api/tasks/{repo}/{issue}")).await
     }
 
-    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.send(self.http.get(format!("{}{path}", self.server))).await
     }
 
-    async fn post<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {
+    pub(crate) async fn post<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {
         self.send(self.http.post(format!("{}{path}", self.server)).json(&body)).await
     }
 
@@ -456,7 +456,7 @@ fn cached_try_dir(cache: &Path, repo: &str, issue: u64) -> PathBuf {
 }
 
 /// `$XDG_CACHE_HOME/forge` when that is an absolute path, else `$HOME/.cache/forge`.
-fn cache_root(xdg: Option<OsString>, home: Option<OsString>) -> Result<PathBuf> {
+pub(crate) fn cache_root(xdg: Option<OsString>, home: Option<OsString>) -> Result<PathBuf> {
     let base = match xdg.map(PathBuf::from).filter(|p| p.is_absolute()) {
         Some(dir) => dir,
         None => PathBuf::from(home.filter(|h| !h.is_empty()).context("HOME isn't set")?).join(".cache"),
@@ -540,7 +540,7 @@ async fn run_ssh(argv: Vec<String>) -> Result<()> {
 }
 
 /// The repo named on the command line, else the client config's.
-fn pick_repo(arg: Option<String>, cfg: &ClientConfig) -> Result<String> {
+pub(crate) fn pick_repo(arg: Option<String>, cfg: &ClientConfig) -> Result<String> {
     let repo = arg
         .or_else(|| cfg.repo.clone())
         .context("which repo? pass --repo owner/repo, or set repo in client.toml")?;

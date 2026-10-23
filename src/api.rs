@@ -21,6 +21,9 @@
 //!   POST /api/tasks/:owner/:repo/:n/control {take} -> {holder, mine}: one member at a time
 //!        controls a session from here; it frees itself after 10 idle minutes
 //!   POST /api/tasks/:owner/:repo/:n/input   {text, submit} | {key}: types into the session (the holder only)
+//!   GET  /api/tasks/:owner/:repo/:n/pair    {ask}: `forge pair` waits up to 25 s for the session's next ask
+//!        (`pair::Ask`, or null), and is paired while it keeps asking; one member at a time
+//!   POST /api/tasks/:owner/:repo/:n/pair/:id {answer}: the paired member's answer to that ask
 //! Signed in = `Authorization: Bearer <token>` or the `forge_session` cookie.
 //!
 //! Internal routes (loopback):
@@ -72,6 +75,8 @@ pub struct ApiState {
     pub gh: Arc<dyn GitHubApi>,
     /// Who controls each session from the dashboard.
     pub control: Control,
+    /// Sessions' asks to paired machines, shared with the proxy.
+    pub pairs: crate::pair::Pairs,
 }
 
 /// How long control of a session lasts without input.
@@ -135,6 +140,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/tasks/:owner/:repo/:n/screen", get(screen))
         .route("/api/tasks/:owner/:repo/:n/control", post(control))
         .route("/api/tasks/:owner/:repo/:n/input", post(input))
+        .route("/api/tasks/:owner/:repo/:n/pair", get(pair_next))
+        .route("/api/tasks/:owner/:repo/:n/pair/:id", post(pair_answer))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
 }
@@ -462,6 +469,51 @@ async fn input(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// The paired machine's wait for the session's next ask; it stays paired while it keeps asking.
+async fn pair_next(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((owner, repo, n)): Path<(String, String, String)>,
+) -> ApiResult<Json<Value>> {
+    let me = signed_in(&s, &headers)?;
+    let (rc, n) = repo_member(&s, &me, &owner, &repo, &n)?;
+    let ask = s
+        .pairs
+        .next(&rc.name, n, &me.github, &me.name, crate::pair::POLL_WAIT)
+        .await
+        .map_err(|name| fail(StatusCode::CONFLICT, format!("{name} is paired with #{n}")))?;
+    Ok(Json(json!({ "ask": ask })))
+}
+
+#[derive(Deserialize)]
+struct PairAnswerBody {
+    answer: String,
+}
+
+async fn pair_answer(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((owner, repo, n, id)): Path<(String, String, String, u64)>,
+    body: Result<Json<PairAnswerBody>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let me = signed_in(&s, &headers)?;
+    let Json(b) = body?;
+    let (rc, n) = repo_member(&s, &me, &owner, &repo, &n)?;
+    if !s.pairs.answer(&rc.name, n, &me.github, id, b.answer) {
+        return Err(fail(StatusCode::NOT_FOUND, "Forge's Claude isn't waiting for that answer any more"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// The repo and issue, when `me` is one of the repo's members.
+fn repo_member<'a>(s: &'a ApiState, me: &Member, owner: &str, repo: &str, n: &str) -> ApiResult<(&'a RepoConfig, u64)> {
+    let (rc, n) = repo_issue(s, owner, repo, n)?;
+    if !rc.members.iter().any(|m| m.github.eq_ignore_ascii_case(&me.github)) {
+        return Err(fail(StatusCode::FORBIDDEN, format!("only {}'s members pair with its tasks", rc.name)));
+    }
+    Ok((rc, n))
+}
+
 /// Grants `who`, a member of the repo, the task's live session, through the
 /// proxy with a fresh key, and records when in the kv `attached_at_key`.
 async fn attach(
@@ -673,7 +725,7 @@ mod tests {
         let auth = Arc::new(Auth::new(db.clone(), b"test-secret".to_vec(), cfg.clone(), notes.clone()));
         let pool = Arc::new(Pool::from_tokens(vec![("blue".into(), "plan-token".into())], 85.0, 90.0));
         let gh: Arc<dyn GitHubApi> = Arc::new(FakeHub::default());
-        (ApiState { cfg, db, auth, pool, keys: SessionKeys::new(), busy: Busy::default(), gh, control: Control::default() }, notes)
+        (ApiState { cfg, db, auth, pool, keys: SessionKeys::new(), busy: Busy::default(), gh, control: Control::default(), pairs: Default::default() }, notes)
     }
 
     fn state() -> (ApiState, Arc<RecordingNotifier>) {
@@ -750,6 +802,37 @@ mod tests {
         assert!(skill.starts_with("---\nname: forge\n"), "{skill}");
         assert!(skill.contains("## This Forge\n\nServer: https://forge.example.com\n"), "{skill}");
         assert!(skill.contains("### example-team/shop\n\nOrderer: Bob (@bob-gh). Members: Ann (@ann-gh), Bob (@bob-gh).\n\nRun `make up` to try a branch.\n"), "{skill}");
+    }
+
+    #[tokio::test]
+    async fn a_member_pairs_a_machine_and_answers_the_sessions_ask() {
+        let (st, notes) = state();
+        let pairs = st.pairs.clone();
+        let app = router(st);
+        let ann = format!("Bearer {}", sign_in(&app, &notes, "ann@example.com").await.0);
+        let ann = [("authorization", ann.as_str())];
+        assert_eq!(send(&app, "GET", &format!("/api/tasks/{REPO}/412/pair"), &[], None).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(send(&app, "GET", "/api/tasks/other/repo/412/pair", &ann, None).await.status, StatusCode::NOT_FOUND);
+
+        // Ann's machine asks for work, so the session's ask finds her paired.
+        let waiting = tokio::spawn({
+            let app = app.clone();
+            let ann = ann[0].1.to_string();
+            async move { send(&app, "GET", &format!("/api/tasks/{REPO}/412/pair"), &[("authorization", ann.as_str())], None).await }
+        });
+        while pairs.paired(REPO, 412, Utc::now()).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (answer, by) = pairs.ask(REPO, 412, "sort them".into(), "abc".into(), String::new(), Utc::now()).unwrap();
+        assert_eq!(by, "Ann");
+        let got = waiting.await.unwrap().json();
+        assert_eq!((got["ask"]["text"].as_str(), got["ask"]["base"].as_str()), (Some("sort them"), Some("abc")));
+        let id = got["ask"]["id"].as_u64().unwrap();
+        let body = || Some(json!({ "answer": "sorted 12" }));
+        let wrong = send(&app, "POST", &format!("/api/tasks/{REPO}/412/pair/{}", id + 1), &ann, body()).await;
+        assert_eq!(wrong.status, StatusCode::NOT_FOUND);
+        assert_eq!(send(&app, "POST", &format!("/api/tasks/{REPO}/412/pair/{id}"), &ann, body()).await.status, StatusCode::OK);
+        assert_eq!(answer.await.unwrap(), "sorted 12");
     }
 
     #[tokio::test]

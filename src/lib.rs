@@ -12,6 +12,7 @@ pub mod github;
 pub mod gitops;
 pub mod mcp;
 pub mod notify;
+pub mod pair;
 pub mod pool;
 pub mod proxy;
 pub mod session;

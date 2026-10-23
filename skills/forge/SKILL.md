@@ -30,6 +30,7 @@ With the Forge MCP tools:
 
 With the `forge` CLI, which the user runs in their terminal:
 - `forge try <n>`: runs the task's branch on this machine with the repo's `run` command, from any folder. `forge stop <n>` stops it.
+- `forge pair <n> <folder>...`: lets the task's session ask a Claude on this machine to work with the files in those folders (the user's real reports, say), until Ctrl-C. That Claude runs sandboxed to those folders and the task's code; the files stay here, and only its answers go back.
 - `forge watch <n>`: the live session, read-only. `forge attach <n>`: join it and type. Ctrl-b then d leaves either one without stopping it.
 - `forge new "<title>" --body "<text>"`, `forge ready <n>`, `forge backlog <n>`, `forge accept <n>`, `forge status`.
 

@@ -227,6 +227,9 @@ const RULES: &str = "\
 - Never push, never open PRs, never comment on GitHub: Forge does that.
 - Run builds through the build slot: `$FORGE_BIN slot -- <build command>`. Only one build fits on the box at a time.
 - Never put real customer data anywhere; use synthetic data only.
+- When someone runs `forge pair <n> <folder>` on their machine, `$FORGE_BIN local \"<ask>\"` has the Claude there work \
+with their files (real reports, say) on your code as it is now, and prints its answer. Their files stay there: ask for \
+results.
 ";
 
 const BUILD_ENDING: &str = r#"## How to end
@@ -643,6 +646,7 @@ mod tests {
             "Never push, never open PRs, never comment on GitHub",
             "`$FORGE_BIN slot -- <build command>`",
             "use synthetic data only",
+            "`$FORGE_BIN local \"<ask>\"` has the Claude there work with their files",
             "Migrations are numbered",
             "## Issue #412: Export invoices as CSV",
             "Opened by @bob-gh.",
