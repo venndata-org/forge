@@ -256,7 +256,8 @@ pub async fn cmd_pair(repo: Option<String>, issue: u64, folders: Vec<PathBuf>) -
     let cache = cache_root(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))?;
     let worktree = pair_worktree(&cache, &repo, issue)?;
     let settings = worktree.with_extension("settings.json");
-    std::fs::write(&settings, serde_json::to_vec_pretty(&sandbox_settings(&folders))?)?;
+    let login = ClientConfig::path()?.parent().context("no config folder")?.to_path_buf();
+    std::fs::write(&settings, serde_json::to_vec_pretty(&sandbox_settings(&folders, &login))?)?;
     let shown: Vec<String> = folders.iter().map(|f| f.display().to_string()).collect();
     println!(
         "Paired with #{issue} {}.\nIts session can ask a Claude here to work on {}.\nThat Claude runs sandboxed: only \
@@ -344,11 +345,13 @@ fn put_code(worktree: &Path, ask: &Ask) -> Result<()> {
 /// never out of it, writes in the folders, the code and package caches only,
 /// no network but package registries and local ports, no secrets read, and
 /// no web tools (anything fetched could carry the user's files out).
-fn sandbox_settings(folders: &[PathBuf]) -> Value {
+/// `login` is the folder that holds this CLI's token, wherever it is.
+fn sandbox_settings(folders: &[PathBuf], login: &Path) -> Value {
     let mut writable: Vec<String> = folders.iter().map(|f| format!("/{}", f.display())).collect();
     writable.extend(["~/.cargo", "~/.npm", "~/.cache"].map(String::from));
     let secrets = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker", "~/.config/gh", "~/.config/forge", "~/.config/gcloud", "~/Library/Keychains"];
     let mut deny: Vec<String> = secrets.iter().map(|s| format!("Read({s}/**)")).collect();
+    deny.push(format!("Read(/{}/**)", login.display()));
     deny.extend(["Read(~/.netrc)", "WebFetch", "WebSearch"].map(String::from));
     json!({
         "sandbox": {
@@ -571,11 +574,11 @@ mod tests {
 
     #[test]
     fn the_paired_claude_is_sandboxed_to_its_folders() {
-        let s = sandbox_settings(&[PathBuf::from("/Users/ann/reports")]);
+        let s = sandbox_settings(&[PathBuf::from("/Users/ann/reports")], Path::new("/Users/ann/conf/forge"));
         assert_eq!(s["sandbox"]["allowUnsandboxedCommands"], json!(false));
         assert_eq!(s["sandbox"]["filesystem"]["allowWrite"][0], json!("//Users/ann/reports"));
         let deny = s["permissions"]["deny"].to_string();
-        for part in ["Read(~/.ssh/**)", "Read(~/.config/forge/**)", "WebFetch", "WebSearch"] {
+        for part in ["Read(~/.ssh/**)", "Read(~/.config/forge/**)", "Read(//Users/ann/conf/forge/**)", "WebFetch", "WebSearch"] {
             assert!(deny.contains(part), "missing {part} in {deny}");
         }
     }
