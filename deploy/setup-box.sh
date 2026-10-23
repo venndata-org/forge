@@ -6,6 +6,10 @@
 set -euo pipefail
 
 DOMAIN="${FORGE_DOMAIN:?set FORGE_DOMAIN to the domain of this box, e.g. forge.example.com}"
+here="$(cd "$(dirname "$0")" && pwd)"
+# Run from /: the commands below run as other users, and git and python fail when
+# they can't read the folder they start in (say, a copy of deploy/ under /root).
+cd /
 
 apt-get update -q
 apt-get install -yq git curl ca-certificates sudo caddy tmux libssl-dev pkg-config
@@ -77,18 +81,18 @@ if [ ! -x /usr/local/bin/claude ]; then
     echo "Install Claude Code as a root-owned /usr/local/bin/claude (RUNBOOK.md, step 5), then re-run." >&2
 fi
 
-install -m 644 "$(dirname "$0")/forge.service" /etc/systemd/system/forge.service
-install -m 644 "$(dirname "$0")/forge-tmux.service" /etc/systemd/system/forge-tmux.service
+install -m 644 "$here/forge.service" /etc/systemd/system/forge.service
+install -m 644 "$here/forge-tmux.service" /etc/systemd/system/forge-tmux.service
 # needrestart (apt, unattended upgrades) must never restart the tmux server:
 # that would end every task's Claude session.
 mkdir -p /etc/needrestart/conf.d
 echo '$nrconf{override_rc}{qr(^forge-tmux\.service$)} = 0;' > /etc/needrestart/conf.d/forge.conf
-install -m 644 "$(dirname "$0")/forge-keys.service" /etc/systemd/system/forge-keys.service
-install -m 644 "$(dirname "$0")/forge-keys.timer" /etc/systemd/system/forge-keys.timer
+install -m 644 "$here/forge-keys.service" /etc/systemd/system/forge-keys.service
+install -m 644 "$here/forge-keys.timer" /etc/systemd/system/forge-keys.timer
 # Hourly, root updates that copy; sessions don't update themselves.
-install -m 755 "$(dirname "$0")/forge-claude-update.sh" /usr/local/sbin/forge-claude-update
-install -m 644 "$(dirname "$0")/forge-claude-update.service" /etc/systemd/system/forge-claude-update.service
-install -m 644 "$(dirname "$0")/forge-claude-update.timer" /etc/systemd/system/forge-claude-update.timer
+install -m 755 "$here/forge-claude-update.sh" /usr/local/sbin/forge-claude-update
+install -m 644 "$here/forge-claude-update.service" /etc/systemd/system/forge-claude-update.service
+install -m 644 "$here/forge-claude-update.timer" /etc/systemd/system/forge-claude-update.timer
 systemctl daemon-reload
 echo "Box ready. Next: secrets, config and 'forge check-config' (RUNBOOK.md)."
 
