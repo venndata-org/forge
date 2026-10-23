@@ -25,9 +25,12 @@ pub trait Runner: Send + Sync {
 /// Claude Code settings for Forge's sessions. No background commands: a turn
 /// that ends while one runs reads as finished, so tests run in the foreground,
 /// with time for a full suite that waits its turn on the build slot. No
-/// self-updates: root keeps the binary current (forge-claude-update).
-pub const CLAUDE_ENV: [(&str, &str); 4] = [
+/// self-updates: root keeps the binary current (forge-claude-update). The
+/// classic renderer: the full-screen one draws on tmux's alternate screen,
+/// which keeps no scrollback, so the dashboard couldn't scroll back.
+pub const CLAUDE_ENV: [(&str, &str); 5] = [
     ("DISABLE_AUTOUPDATER", "1"),
+    ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1"),
     ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
     ("BASH_DEFAULT_TIMEOUT_MS", "1800000"),
     ("BASH_MAX_TIMEOUT_MS", "7200000"),
@@ -446,6 +449,7 @@ mod tests {
             ("FORGE_BIN", "/usr/local/bin/forge"),
             ("FORGE_ISSUE", "412"),
             ("DISABLE_AUTOUPDATER", "1"),
+            ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1"),
             ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
             ("BASH_DEFAULT_TIMEOUT_MS", "1800000"),
             ("BASH_MAX_TIMEOUT_MS", "7200000"),
